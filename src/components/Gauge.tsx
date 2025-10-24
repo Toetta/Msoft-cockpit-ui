@@ -1,6 +1,21 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { useSpring, useMotionValue } from "framer-motion";
-import { clamp, lerp, mapRange } from "./utils";
+import React, { useMemo } from "react";
+
+/* tiny helpers */
+const clamp = (x: number, a: number, b: number) => Math.max(a, Math.min(b, x));
+const lerp  = (a: number, b: number, t: number) => a + (b - a) * t;
+
+/** Map value in [min,max] to angle in [start,end] (deg). 0° = up. */
+function valueToAngle(v: number, min: number, max: number, startDeg: number, endDeg: number) {
+  if (!(Number.isFinite(v) && Number.isFinite(min) && Number.isFinite(max)) || max <= min) return 0;
+  const t = clamp((v - min) / (max - min), 0, 1);
+  return lerp(startDeg, endDeg, t);
+}
+
+/** Polar to cartesian around local origin (0,0). 0° = up. */
+function polar(angDeg: number, radius: number) {
+  const a = (angDeg - 90) * (Math.PI / 180);
+  return { x: radius * Math.cos(a), y: radius * Math.sin(a) };
+}
 
 export type Range = { from: number; to: number };
 
@@ -10,16 +25,17 @@ export type GaugeProps = {
   min: number;
   max: number;
   unit?: string;
-  centerValue?: number;
+  /** total angular span (deg), symmetric around up; default 240° → ±120° */
+  spanDeg?: number;
+  /** major tick count (incl. min/max) */
+  ticks?: number;
+  /** value formatter */
+  format?: (v: number) => string;
+  /** optional bands */
   goodRange?: Range;
   warnRange?: Range;
   badRange?: Range;
-  spanDeg?: number;
-  ticks?: number;
-  format?: (v: number) => string;
 };
-
-const EPS = 1e-6;
 
 const Gauge: React.FC<GaugeProps> = ({
   label,
@@ -27,70 +43,40 @@ const Gauge: React.FC<GaugeProps> = ({
   min,
   max,
   unit,
-  centerValue,
-  goodRange,
-  warnRange,
-  badRange,
   spanDeg = 240,
   ticks = 7,
   format,
+  goodRange,
+  warnRange,
+  badRange,
 }) => {
-  const cx = 100;
-  const cy = 100;
-  const r = 78;
+  // Dial center is (0,0) by design via centered viewBox.
+  const rDial = 78;   // tick/band radius
+  const rBezel = 92;  // outer ring
   const start = -spanDeg / 2;
-  const end = spanDeg / 2;
+  const end   =  spanDeg / 2;
 
-  // robust center
-  const cVal = useMemo(() => {
-    if (Number.isFinite(centerValue as number)) return centerValue as number;
-    if (goodRange) return (goodRange.from + goodRange.to) / 2;
-    return (min + max) / 2;
-  }, [centerValue, goodRange, min, max]);
+  // Deterministic angle for needle
+  const angle = useMemo(() => valueToAngle(value, min, max, start, end), [value, min, max, start, end]);
 
-  // robust span and mapping
-  const span = Math.max(cVal - min, max - cVal, EPS);
-  const norm = clamp((value - cVal) / span, -1, 1);
-  const targetAngle = mapRange(norm, -1, 1, start, end);
-
-  // Smoothed motion value -> plain angle
-  const mv = useMotionValue(targetAngle);
-  const spring = useSpring(mv, { stiffness: 140, damping: 20, mass: 0.5 });
-  const [angle, setAngle] = useState(targetAngle);
-
-  useEffect(() => {
-    mv.set(targetAngle);
-  }, [targetAngle, mv]);
-
-  useEffect(() => {
-    const unsub = spring.on("change", (v) => setAngle(v));
-    return () => unsub();
-  }, [spring]);
-
-  const toXY = (ang: number, radius = r) => {
-    const rad = (ang - 90) * (Math.PI / 180);
-    return { x: cx + radius * Math.cos(rad), y: cy + radius * Math.sin(rad) };
+  // Band path between angles [a1,a2]
+  const bandPath = (fromDeg: number, toDeg: number, rOuter = rDial, width = 8) => {
+    const a = Math.min(fromDeg, toDeg), b = Math.max(fromDeg, toDeg);
+    const large = (b - a) > 180 ? 1 : 0;
+    const p1o = polar(a, rOuter), p2o = polar(b, rOuter);
+    const p1i = polar(a, rOuter - width), p2i = polar(b, rOuter - width);
+    return `M ${p1o.x} ${p1o.y} A ${rOuter} ${rOuter} 0 ${large} 1 ${p2o.x} ${p2o.y}
+            L ${p2i.x} ${p2i.y} A ${rOuter - width} ${rOuter - width} 0 ${large} 0 ${p1i.x} ${p1i.y} Z`;
   };
 
-  const arcPath = (from: number, to: number, radius = r, width = 8) => {
-    const p1o = toXY(from, radius);
-    const p2o = toXY(to, radius);
-    const p1i = toXY(from, radius - width);
-    const p2i = toXY(to, radius - width);
-    const large = Math.abs(to - from) > 180 ? 1 : 0;
-    return `M ${p1o.x} ${p1o.y} A ${radius} ${radius} 0 ${large} 1 ${p2o.x} ${p2o.y}
-            L ${p2i.x} ${p2i.y} A ${radius - width} ${radius - width} 0 ${large} 0 ${p1i.x} ${p1i.y} Z`;
-  };
-
-  const bandToArc = (rng?: Range, color = "#16a34a") => {
+  const band = (rng?: Range, color = "#22c55e") => {
     if (!rng) return null;
-    const a1 = mapRange(rng.from, min, max, start, end);
-    const a2 = mapRange(rng.to, min, max, start, end);
-    const f = Math.min(a1, a2),
-      t = Math.max(a1, a2);
-    return <path d={arcPath(f, t)} fill={color} opacity={0.25} />;
+    const a1 = valueToAngle(rng.from, min, max, start, end);
+    const a2 = valueToAngle(rng.to,   min, max, start, end);
+    return <path d={bandPath(a1, a2)} fill={color} opacity={0.25} />;
   };
 
+  // Status color for numeric readout
   const statusColor = (() => {
     const v = value;
     if (badRange && (v < badRange.from || v > badRange.to)) return "#ef4444";
@@ -98,95 +84,52 @@ const Gauge: React.FC<GaugeProps> = ({
     return "#22c55e";
   })();
 
-  const majorTicks = Array.from({ length: ticks }, (_, i) => {
+  // Major ticks + labels
+  const majorTicks = Array.from({ length: Math.max(2, ticks) }, (_, i) => {
     const t = i / (ticks - 1);
-    const ang = lerp(start, end, t);
-    const p1 = toXY(ang, r);
-    const p2 = toXY(ang, r - 10);
-    const val = lerp(min, max, t);
+    const v = lerp(min, max, t);
+    const a = lerp(start, end, t);
+    const p1 = polar(a, rDial);
+    const p2 = polar(a, rDial - 10);
+    const pt = polar(a, rDial - 18);
     return (
       <g key={i}>
-        <line
-          x1={p1.x}
-          y1={p1.y}
-          x2={p2.x}
-          y2={p2.y}
-          stroke="#94a3b8"
-          strokeWidth={2}
-        />
-        <text
-          x={toXY(ang, r - 18).x}
-          y={toXY(ang, r - 18).y}
-          fill="#94a3b8"
-          fontSize={9}
-          textAnchor="middle"
-          dominantBaseline="central"
-        >
-          {format ? format(val) : Math.round(val)}
+        <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#94a3b8" strokeWidth={2} />
+        <text x={pt.x} y={pt.y} fill="#94a3b8" fontSize={9} textAnchor="middle" dominantBaseline="central">
+          {format ? format(v) : Math.round(v)}
         </text>
       </g>
     );
   });
 
-  const needleAngle = Number.isFinite(angle) ? angle : 0;
-
   return (
     <div className="relative aspect-square w-full max-w-[240px] select-none">
-      <svg viewBox="0 0 200 200" className="w-full h-full drop-shadow-sm">
-        {/* bezel */}
-        <circle
-          cx={cx}
-          cy={cy}
-          r={92}
-          fill="#0b1220"
-          stroke="#1f2937"
-          strokeWidth={2}
-        />
-        {/* color bands */}
-        {bandToArc(goodRange, "#22c55e")}
-        {bandToArc(warnRange, "#f59e0b")}
-        {bandToArc(badRange, "#ef4444")}
-        {/* ticks */}
+      {/* Centered viewBox: origin (0,0) = ring center. */}
+      <svg viewBox="-100 -100 200 200" className="w-full h-full drop-shadow-sm">
+        {/* bezel (outer) + your thin reference ring (concentric) */}
+        <circle cx="0" cy="0" r={rBezel} fill="#0b1220" stroke="#1f2937" strokeWidth={2} />
+        <circle cx="0" cy="0" r={rDial - 22} fill="none" stroke="#e5e7eb" strokeWidth={0.8} opacity={0.15} />
+
+        {/* bands & ticks */}
+        {band(goodRange, "#22c55e")}
+        {band(warnRange, "#f59e0b")}
+        {band(badRange,  "#ef4444")}
         {majorTicks}
-        {/* center tick (up) */}
-        <line
-          x1={cx}
-          y1={cy - r}
-          x2={cx}
-          y2={cy - r + 8}
-          stroke="#64748b"
-          strokeWidth={2}
-        />
-        {/* center dot */}
-        <circle cx={cx} cy={cy} r={4} fill="#111827" stroke="#94a3b8" />
-        {/* Needle (now uses precise SVG rotation around cx,cy) */}
-        <g transform={`rotate(${needleAngle} ${cx} ${cy})`}>
-          <polygon
-            points={`${cx},${cy - 60} ${cx - 3},${cy + 12} ${cx + 3},${cy + 12}`}
-            fill="#e5e7eb"
-          />
-          <circle cx={cx} cy={cy} r={6} fill="#0b1220" stroke="#e5e7eb" />
+
+        {/* up tick and center hub */}
+        <line x1="0" y1={-rDial} x2="0" y2={-rDial + 8} stroke="#64748b" strokeWidth={2} />
+        <circle cx="0" cy="0" r="4" fill="#111827" stroke="#94a3b8" />
+
+        {/* NEEDLE — drawn UP from origin, rotated around (0,0) */}
+        <g transform={`rotate(${Number.isFinite(angle) ? angle : 0})`}>
+          <line x1="0" y1="10" x2="0" y2="-60" stroke="#e5e7eb" strokeWidth="3" strokeLinecap="round" />
+          <circle cx="0" cy="0" r="6" fill="#0b1220" stroke="#e5e7eb" />
         </g>
-        {/* labels */}
-        <text
-          x={cx}
-          y={cy + 36}
-          fill="#e5e7eb"
-          fontWeight={600}
-          fontSize={12}
-          textAnchor="middle"
-        >
-          {label}
-        </text>
-        <text
-          x={cx}
-          y={cy + 52}
-          fill={statusColor}
-          fontSize={12}
-          textAnchor="middle"
-        >
-          {format ? format(value) : value.toFixed(0)}
-          {unit ? ` ${unit}` : ""}
+
+        {/* label & numeric readout */}
+        <text x="0" y="36" fill="#e5e7eb" fontWeight={600} fontSize={12} textAnchor="middle">{label}</text>
+        <text x="0" y="52" fill={statusColor} fontSize={12} textAnchor="middle">
+          {format ? format(value) : value.toFixed(0)}{unit ? ` ${unit}` : ""}
         </text>
       </svg>
     </div>
