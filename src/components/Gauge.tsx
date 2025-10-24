@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo } from 'react'
-import { motion, useSpring } from 'framer-motion'
-import { clamp, lerp, mapRange } from './utils'
+import React, { useEffect, useMemo, useState } from "react";
+import { useSpring, useMotionValue } from "framer-motion";
+import { clamp, lerp, mapRange } from "./utils";
 
 export type Range = { from: number; to: number };
 
@@ -22,11 +22,24 @@ export type GaugeProps = {
 const EPS = 1e-6;
 
 const Gauge: React.FC<GaugeProps> = ({
-  label, value, min, max, unit, centerValue,
-  goodRange, warnRange, badRange, spanDeg = 240, ticks = 7, format
+  label,
+  value,
+  min,
+  max,
+  unit,
+  centerValue,
+  goodRange,
+  warnRange,
+  badRange,
+  spanDeg = 240,
+  ticks = 7,
+  format,
 }) => {
-  const cx = 100, cy = 100, r = 78;
-  const start = -spanDeg / 2, end = spanDeg / 2;
+  const cx = 100;
+  const cy = 100;
+  const r = 78;
+  const start = -spanDeg / 2;
+  const end = spanDeg / 2;
 
   // robust center
   const cVal = useMemo(() => {
@@ -35,23 +48,24 @@ const Gauge: React.FC<GaugeProps> = ({
     return (min + max) / 2;
   }, [centerValue, goodRange, min, max]);
 
-  // robust value
-  const vSafe = Number.isFinite(value) ? value : cVal;
+  // robust span and mapping
+  const span = Math.max(cVal - min, max - cVal, EPS);
+  const norm = clamp((value - cVal) / span, -1, 1);
+  const targetAngle = mapRange(norm, -1, 1, start, end);
 
-  // compute angle safely
-  const angle = useMemo(() => {
-    const span = Math.max(cVal - min, max - cVal);
-    const safeSpan = span < EPS ? 1 /* avoid div0 */ : span;
-    const norm = clamp((vSafe - cVal) / safeSpan, -1, 1);
-    const a = mapRange(norm, -1, 1, start, end);
-    return Number.isFinite(a) ? a : 0;
-  }, [vSafe, min, max, cVal, start, end]);
+  // Smoothed motion value -> plain angle
+  const mv = useMotionValue(targetAngle);
+  const spring = useSpring(mv, { stiffness: 140, damping: 20, mass: 0.5 });
+  const [angle, setAngle] = useState(targetAngle);
 
-  // animated spring with safe target
-  const spring = useSpring(angle, { stiffness: 140, damping: 20, mass: 0.5 });
   useEffect(() => {
-    spring.set(Number.isFinite(angle) ? angle : 0);
-  }, [angle, spring]);
+    mv.set(targetAngle);
+  }, [targetAngle, mv]);
+
+  useEffect(() => {
+    const unsub = spring.on("change", (v) => setAngle(v));
+    return () => unsub();
+  }, [spring]);
 
   const toXY = (ang: number, radius = r) => {
     const rad = (ang - 90) * (Math.PI / 180);
@@ -71,13 +85,14 @@ const Gauge: React.FC<GaugeProps> = ({
   const bandToArc = (rng?: Range, color = "#16a34a") => {
     if (!rng) return null;
     const a1 = mapRange(rng.from, min, max, start, end);
-    const a2 = mapRange(rng.to,   min, max, start, end);
-    const f = Math.min(a1, a2), t = Math.max(a1, a2);
+    const a2 = mapRange(rng.to, min, max, start, end);
+    const f = Math.min(a1, a2),
+      t = Math.max(a1, a2);
     return <path d={arcPath(f, t)} fill={color} opacity={0.25} />;
   };
 
   const statusColor = (() => {
-    const v = vSafe;
+    const v = value;
     if (badRange && (v < badRange.from || v > badRange.to)) return "#ef4444";
     if (warnRange && (v < warnRange.from || v > warnRange.to)) return "#f59e0b";
     return "#22c55e";
@@ -91,50 +106,91 @@ const Gauge: React.FC<GaugeProps> = ({
     const val = lerp(min, max, t);
     return (
       <g key={i}>
-        <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#94a3b8" strokeWidth={2} />
-        <text x={toXY(ang, r - 18).x} y={toXY(ang, r - 18).y} fill="#94a3b8" fontSize={9} textAnchor="middle" dominantBaseline="central">
+        <line
+          x1={p1.x}
+          y1={p1.y}
+          x2={p2.x}
+          y2={p2.y}
+          stroke="#94a3b8"
+          strokeWidth={2}
+        />
+        <text
+          x={toXY(ang, r - 18).x}
+          y={toXY(ang, r - 18).y}
+          fill="#94a3b8"
+          fontSize={9}
+          textAnchor="middle"
+          dominantBaseline="central"
+        >
           {format ? format(val) : Math.round(val)}
         </text>
       </g>
     );
   });
 
-  const angleFinite = Number.isFinite(angle);
-  const staticRotate = `rotate(${angleFinite ? angle : 0} ${cx} ${cy})`;
+  const needleAngle = Number.isFinite(angle) ? angle : 0;
 
   return (
     <div className="relative aspect-square w-full max-w-[240px] select-none">
       <svg viewBox="0 0 200 200" className="w-full h-full drop-shadow-sm">
         {/* bezel */}
-        <circle cx={cx} cy={cy} r={92} fill="#0b1220" stroke="#1f2937" strokeWidth={2} />
-        {/* bands */}
+        <circle
+          cx={cx}
+          cy={cy}
+          r={92}
+          fill="#0b1220"
+          stroke="#1f2937"
+          strokeWidth={2}
+        />
+        {/* color bands */}
         {bandToArc(goodRange, "#22c55e")}
         {bandToArc(warnRange, "#f59e0b")}
-        {bandToArc(badRange,  "#ef4444")}
-        {/* scale */}
+        {bandToArc(badRange, "#ef4444")}
+        {/* ticks */}
         {majorTicks}
         {/* center tick (up) */}
-        <line x1={cx} y1={cy - r} x2={cx} y2={cy - r + 8} stroke="#64748b" strokeWidth={2} />
+        <line
+          x1={cx}
+          y1={cy - r}
+          x2={cx}
+          y2={cy - r + 8}
+          stroke="#64748b"
+          strokeWidth={2}
+        />
         {/* center dot */}
         <circle cx={cx} cy={cy} r={4} fill="#111827" stroke="#94a3b8" />
-        {/* needle */}
-        <motion.g
-          // Ensure SVG origin is respected by Framer Motion:
-          style={{ rotate: spring, transformBox: 'fill-box', transformOrigin: `${cx}px ${cy}px` }}
-          // Also provide a static transform as a safety fallback (when angle becomes NaN):
-          transform={staticRotate}
-        >
-          <polygon points={`${cx},${cy - 60} ${cx - 3},${cy + 12} ${cx + 3},${cy + 12}`} fill="#e5e7eb" />
+        {/* Needle (now uses precise SVG rotation around cx,cy) */}
+        <g transform={`rotate(${needleAngle} ${cx} ${cy})`}>
+          <polygon
+            points={`${cx},${cy - 60} ${cx - 3},${cy + 12} ${cx + 3},${cy + 12}`}
+            fill="#e5e7eb"
+          />
           <circle cx={cx} cy={cy} r={6} fill="#0b1220" stroke="#e5e7eb" />
-        </motion.g>
-        {/* label & readout */}
-        <text x={cx} y={cy + 36} fill="#e5e7eb" fontWeight={600} fontSize={12} textAnchor="middle">{label}</text>
-        <text x={cx} y={cy + 52} fill={statusColor} fontSize={12} textAnchor="middle">
-          {format ? format(vSafe) : vSafe.toFixed(0)}{unit ? ` ${unit}` : ""}
+        </g>
+        {/* labels */}
+        <text
+          x={cx}
+          y={cy + 36}
+          fill="#e5e7eb"
+          fontWeight={600}
+          fontSize={12}
+          textAnchor="middle"
+        >
+          {label}
+        </text>
+        <text
+          x={cx}
+          y={cy + 52}
+          fill={statusColor}
+          fontSize={12}
+          textAnchor="middle"
+        >
+          {format ? format(value) : value.toFixed(0)}
+          {unit ? ` ${unit}` : ""}
         </text>
       </svg>
     </div>
   );
-}
+};
 
-export default Gauge
+export default Gauge;
